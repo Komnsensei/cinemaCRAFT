@@ -1,0 +1,136 @@
+{
+  "project_context": {
+    "app_type": "hybrid_fullstack",
+    "description": "Netflix-style AI movie creation and streaming platform with integrated AI assistant, multi-file media decoder, and creator studio.",
+    "theme_mode": "dark",
+    "archetype": "Archetype 5 (Jewel & Luxury) mixed with dark sci-fi cinematic vibes"
+  },
+  "color_palette": {
+    "brand_primary": "#dc143c",
+    "brand_secondary": "#5a0b8a",
+    "background_base": "#0a050f",
+    "background_surface": "#12091c",
+    "background_glass": "bg-black/60",
+    "text_primary": "#ffffff",
+    "text_secondary": "#a098b0",
+    "text_accent": "#ff2a5f",
+    "border_subtle": "#2c1c3f",
+    "hover_state": "#ff2a5f",
+    "rules": [
+      "No pure #000000. Use tinted deep violet-black (#0a050f) for the void.",
+      "Primary CTA gets crimson (#dc143c) with hover to a lighter hue.",
+      "Use #5a0b8a (violet) for subtle glowing borders or AI assistant chat areas to distinguish them from movie content."
+    ]
+  },
+  "typography": {
+    "font_family": {
+      "headings": "Playfair Display, serif",
+      "body": "Outfit, sans-serif"
+    },
+    "scale": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tighter font-black",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight font-bold",
+      "h3": "text-xl sm:text-2xl font-bold",
+      "h4": "text-lg sm:text-xl font-medium",
+      "body": "text-base leading-relaxed font-light",
+      "labels": "uppercase text-xs tracking-[0.2em] font-medium"
+    },
+    "rules": [
+      "Avoid Inter. Use Playfair Display for big cinematic movie titles. Use Outfit for clean UI dashboards.",
+      "Never center-align large dense text. Center only for hero headlines if it improves symmetry."
+    ]
+  },
+  "spacing_and_layout": {
+    "philosophy": "Generous Spacing Philosophy with tension via bento grids.",
+    "marketing_hub_mode": {
+      "grid": "Bento Grid Mode A (Tetris Grid) - grid-cols-1 md:grid-cols-8 lg:grid-cols-12 gap-8",
+      "usage": "For the main 'Netflix-styled' discovery hub, For You, and Genres."
+    },
+    "creator_studio_mode": {
+      "grid": "Control Room Grid Mode B - grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4",
+      "usage": "For the movie creator studio, property pickers, and multi-file decoder. Every pixel utilized."
+    },
+    "spacing_scale": "p-1, p-2, p-4, p-6, p-8, p-12, p-16, p-24, p-32"
+  },
+  "surfaces_and_micro_themes": {
+    "header": "Crystal Glass: bg-black/60 backdrop-blur-2xl border-b border-white/10 shadow-sm z-50 sticky top-0",
+    "movie_cards": "Flat background with 1px subtle border (border-border/40). On hover: -translate-y-1, subtle crimson glow drop-shadow.",
+    "ai_chat_center": "Tracing Beam (Aceternity Look) - Use a shimmering violet/crimson border to highlight the AI assistant. High tech contrast.",
+    "hero_overlay": "Gradient overlay for hero banners: bg-gradient-to-r from-black/80 via-black/40 to-transparent. Never blanket max opacity."
+  },
+  "motion_and_interactions": {
+    "rules": [
+      "All interactive elements MUST have a hover state changing BOTH color and transform.",
+      "Hover text must not become invisible. Use hover:text-white explicitly.",
+      "Lists of movies (trending, best rated) must have staggered entrance animations."
+    ],
+    "transition": "transition-all duration-300 ease-in-out"
+  },
+  "components_strategy": {
+    "shadcn_usage": "Use Shadcn components for forms, inputs, tabs, and select dropdowns, but strip Vercal-look and apply cinematic dark theme styles.",
+    "html_usage": "Use pure HTML/Tailwind for movie bento grids, hero sections, and custom layouts.",
+    "tabs": "Override fixed heights like h-9 on Shadcn TabsList to h-auto.",
+    "icons": "Use lucide-react (default). Size 16px to 24px."
+  },
+  "accessibility_and_testing": {
+    "contrast": "Ensure APCA contrast standards. Dark backgrounds need bright text.",
+    "data_testid_rule": "CRITICAL: All interactive and key informational elements MUST include a data-testid attribute in kebab-case based on role (e.g., data-testid='movie-play-button', data-testid='ai-chat-input')."
+  },
+  "media": {
+    "hero_posters": [
+      {
+        "category": "Hero Sci-Fi Title",
+        "url": "https://static.prod-images.emergentagent.com/jobs/cd82ad5f-84fc-4d9d-b6ee-3a051a409226/images/0414d3cf28545ea7882ee154528b297f72298eea77c1e260a3fb42a017241f54.png",
+        "description": "Ultra high definition cinematic movie poster, dark sleek deep space sci-fi theme."
+      },
+      {
+        "category": "Strange AI Genre Poster",
+        "url": "https://static.prod-images.emergentagent.com/jobs/cd82ad5f-84fc-4d9d-b6ee-3a051a409226/images/bc838c12087970f22a88f44351d218790c83a4d4f67cb19e8f75bf25f5620373.png",
+        "description": "Abstract surreal cinematic movie poster for Strange AI."
+      }
+    ],
+    "backgrounds": [
+      {
+        "category": "App Background",
+        "url": "https://static.prod-images.emergentagent.com/jobs/cd82ad5f-84fc-4d9d-b6ee-3a051a409226/images/7ab236b8f0901cd7cf40dcb6549773e2a167e693066b45665bcb50ef606019c3.png",
+        "description": "High end cinematic title card background, dark sleek obsidian texture."
+      }
+    ],
+    "movie_scenes": [
+      {
+        "category": "Trending Movie Scene 1",
+        "url": "https://images.unsplash.com/photo-1489846986031-7cea03ab8fd0?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODd8MHwxfHNlYXJjaHwxfHxjaW5lbWF0aWMlMjBkYXJrJTIwbW92aWUlMjBzY2VuZXxlbnwwfHx8fDE3Nzk0MTA3Njl8MA&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "Trending Movie Scene 2",
+        "url": "https://images.unsplash.com/photo-1633885274919-04b5af171f8c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODd8MHwxfHNlYXJjaHwzfHxjaW5lbWF0aWMlMjBkYXJrJTIwbW92aWUlMjBzY2VuZXxlbnwwfHx8fDE3Nzk0MTA3Njl8MA&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "Trending Movie Scene 3",
+        "url": "https://images.pexels.com/photos/23384428/pexels-photo-23384428.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940"
+      }
+    ],
+    "actors": [
+      {
+        "category": "Actor Profile 1",
+        "url": "https://images.unsplash.com/photo-1587397845856-e6cf49176c70?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzR8MHwxfHNlYXJjaHwyfHxwcm9mZXNzaW9uYWwlMjBkcmFtYXRpYyUyMGFjdG9yJTIwcG9ydHJhaXR8ZW58MHx8fHwxNzc5NDEwNzY5fDA&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "Actor Profile 2",
+        "url": "https://images.unsplash.com/photo-1606143412458-acc5f86de897?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzR8MHwxfHNlYXJjaHwzfHxwcm9mZXNzaW9uYWwlMjBkcmFtYXRpYyUyMGFjdG9yJTIwcG9ydHJhaXR8ZW58MHx8fHwxNzc5NDEwNzY5fDA&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "Actor Profile 3",
+        "url": "https://images.pexels.com/photos/37105844/pexels-photo-37105844.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940"
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Read this JSON and strictly follow the Dark Cinematic Jewel & Luxury archetype.",
+    "Implement the Netflix-style hub using Mode A Bento Grids.",
+    "Implement the creator studio with dense Control Room Grid (Mode B).",
+    "The central AI agent chat must use Aceternity style glowing borders to pop against the dark UI.",
+    "For ALL .js component files, include the defined data-testid attributes.",
+    "Consume media URLs precisely as categorized for banners, scene thumbnails, and actor profiles."
+  ]
+}
