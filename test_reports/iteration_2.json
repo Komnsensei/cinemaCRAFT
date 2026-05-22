@@ -1,0 +1,65 @@
+{
+  "summary": "Tested Tip-the-Forger Stripe payment feature. 8/11 new tips tests pass. CRITICAL backend bug: GET /api/tips/status/{session_id} returns 500 because emergentintegrations Stripe proxy cannot find sessions it just created via the same key. Regression: all 27 prior backend tests still pass. Frontend tip flow works end-to-end through Stripe redirect, including `?tip_cancelled=1` toast handling.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "GET /api/tips/status/{session_id}",
+        "issue": "Returns 500 InternalServerError. Underlying error from emergentintegrations: 'Failed to retrieve session status: No such checkout.session: <id>'. The session was created successfully via the same StripeCheckout(api_key='sk_test_emergent') instance (proxy base https://integrations.emergentagent.com/stripe), but stripe.checkout.Session.retrieve() against the same proxy returns 'No such checkout.session'. Reproducible with a standalone create+retrieve script (see RCA). This breaks the entire frontend polling-after-redirect flow: a paid tip would NEVER be confirmed via /tips/status, only via the webhook. _credit_tip() never runs from the status path, so tips_count/tips_total_cents would not update if Stripe webhook isn't actually delivered to this preview URL.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/tips/checkout",
+        "issue": "origin_url is taken from the client; a malicious client could redirect users to attacker-controlled domains via success_url/cancel_url. Consider validating against an allow-list or deriving origin from request headers."
+      },
+      {
+        "endpoint": "POST /api/webhook/stripe",
+        "issue": "No webhook_secret is configured; emergentintegrations.handle_webhook is called without a signing secret. Signature is effectively unverified. Works (returns 400 on bad signature in our test), but in production Stripe events could be spoofed."
+      },
+      {
+        "endpoint": "GET /api/tips/packages",
+        "issue": "Amount is sent as a float (e.g. 2.0) — fine for now but consider cents/integer to avoid float rounding."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Tip status polling after Stripe success redirect",
+        "issue": "Because /api/tips/status/{sid} returns 500, the polling loop in MovieDetail.jsx will exhaust 6 attempts silently and never show the success toast / never refresh tip-stats. Currently the catch swallows the error, so the user sees no feedback after a real payment. Consider surfacing a fallback error after final attempt.",
+        "affected_selectors": ["[data-testid=tip-stats]"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_tips.py",
+    "/app/backend/tests/test_cinemaforge.py",
+    "/app/test_reports/pytest/tips_results.xml"
+  ],
+  "action_items": [
+    "Investigate emergent Stripe proxy: sessions created via sk_test_emergent at https://integrations.emergentagent.com/stripe are not retrievable via the same key. Likely needs a different retrieve endpoint, or upgrading emergentintegrations. Consider using the websearch tool for emergent Stripe integration retrieval/status documentation.",
+    "Add a final error toast / fallback UI in MovieDetail.jsx polling loop so users aren't left without feedback when /tips/status fails.",
+    "Tighten origin_url validation in /api/tips/checkout to avoid open-redirect via Stripe success/cancel URLs.",
+    "Set STRIPE_WEBHOOK_SECRET and pass it to StripeCheckout so webhook signature is actually verified."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now ~650 lines — split into routers (auth, movies, ai, tips, seed).",
+    "_credit_tip writes both into payment_transactions and into movies + tips collections without a Mongo transaction; if the inserts partially succeed (e.g. movie update OK but tips insert fails) state becomes inconsistent. Wrap in a session or set credited=True AFTER both writes.",
+    "tips_status is a public GET — anyone with a session_id can trigger a Stripe API call and (if proxy worked) a DB write. Consider rate-limiting or requiring auth.",
+    "TIP_PACKAGES stored as floats (2.00, 5.00). Use cents-int throughout backend; convert to dollars only for display.",
+    "GET /api/movies/{mid}/tips exposes tipper_id without masking. Consider returning only username/avatar to avoid leaking user IDs."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_tips.py"
+  ],
+  "success_rate": {"backend": "94% (35/38 incl. regression: 27/27 cinemaforge + 8/11 tips)", "frontend": "100% (tip UI + redirect + cancelled toast)"},
+  "test_credentials": "Tests register fresh users dynamically. Pattern test_tip_<hex>@cinemaforge.io / Pass1234!. UI test viewer: test_uitip_<hex>@cinemaforge.io.",
+  "seed_data_creation": "Reused existing idempotent /api/seed (12 curator movies). One creator-owned + one viewer-owned test movie were created during the tips tests.",
+  "retest_needed": true,
+  "main_agent_can_self_test": false,
+  "context_for_next_testing_agent": "Tests live in /app/backend/tests/test_tips.py. Key new endpoints: GET /api/tips/packages (4 fixed: spark $2, ember $5, blaze $10, inferno $25), POST /api/tips/checkout (auth required, validates package, rejects self-tip with 400 'You can't tip your own forge'), GET /api/tips/status/{sid} (BROKEN — 500), POST /api/webhook/stripe (handles bad sig as 400), GET /api/movies/{id}/tips (count/total/tips). Frontend data-testids: tip-btn, tip-dialog, tip-close, tip-packages, tip-pkg-{spark|ember|blaze|inferno}, tip-confirm, tip-stats. The Stripe redirect URL works (https://checkout.stripe.com/c/pay/cs_test_...). DO NOT complete payment in browser. Webhook secret is NOT configured.",
+  "rca of the issue": "Reproduction: Run standalone script `StripeCheckout(api_key='sk_test_emergent').create_checkout_session(...)` then immediately `get_checkout_status(returned_session_id)`. Create returns a valid `cs_test_...` ID and a `checkout.stripe.com` URL, but retrieve raises `stripe._error.InvalidRequestError: No such checkout.session: cs_test_...`. Library at /root/.venv/lib/python3.11/site-packages/emergentintegrations/payments/stripe/checkout.py sets stripe.api_base='https://integrations.emergentagent.com/stripe' when the key contains 'sk_test_emergent'. Both create and retrieve should hit the proxy, but only create succeeds. Likely the emergent proxy supports POST /checkout/sessions but not GET /checkout/sessions/{id} for the test key, OR session IDs created via proxy aren't retrievable via the same path. Mitigation paths: (a) wait for fixed emergentintegrations release supporting retrieval, (b) catch the CheckoutError in tips_status and return last known DB status (payment_status='initiated') so polling stops gracefully, (c) rely on webhook delivery instead of status polling for crediting."
+}

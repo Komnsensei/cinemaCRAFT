@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import api from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
-import { Play, Heart, Star, Share2, GitFork, Archive as ArchiveIcon, Loader2 } from "lucide-react";
+import { Play, Heart, Star, Share2, GitFork, Archive as ArchiveIcon, Loader2, Flame } from "lucide-react";
+import TipDialog from "@/components/movie/TipDialog";
 
 const LENGTH_LABELS = {
   trailer: "Trailer · 2 min",
@@ -21,11 +22,57 @@ export default function MovieDetail() {
   const [playing, setPlaying] = useState(false);
   const [rating, setRating] = useState(0);
   const [liked, setLiked] = useState(false);
+  const [tipOpen, setTipOpen] = useState(false);
+  const [tipStats, setTipStats] = useState({ count: 0, total: 0 });
+  const [searchParams, setSearchParams] = useSearchParams();
 
   useEffect(() => {
     api.get(`/movies/${id}`).then((r) => setMovie(r.data));
     api.get("/movies", { params: { fork_of: id, limit: 20 } }).then((r) => setForks(r.data));
+    api.get(`/movies/${id}/tips`).then((r) => setTipStats({ count: r.data.count, total: r.data.total }));
   }, [id]);
+
+  // Poll Stripe checkout status when returning from Stripe
+  useEffect(() => {
+    const sid = searchParams.get("tip_session_id");
+    const cancelled = searchParams.get("tip_cancelled");
+    if (cancelled) {
+      toast.message("Tip cancelled");
+      searchParams.delete("tip_cancelled");
+      setSearchParams(searchParams, { replace: true });
+      return;
+    }
+    if (!sid) return;
+    let cancel = false;
+    let attempts = 0;
+    const poll = async () => {
+      if (cancel || attempts >= 6) return;
+      attempts++;
+      try {
+        const r = await api.get(`/tips/status/${sid}`);
+        if (r.data.payment_status === "paid") {
+          toast.success("Tip delivered. The Forger thanks you.");
+          const ts = await api.get(`/movies/${id}/tips`);
+          setTipStats({ count: ts.data.count, total: ts.data.total });
+          searchParams.delete("tip_session_id");
+          setSearchParams(searchParams, { replace: true });
+          return;
+        }
+        if (r.data.status === "expired") {
+          toast.error("Tip session expired.");
+          searchParams.delete("tip_session_id");
+          setSearchParams(searchParams, { replace: true });
+          return;
+        }
+        setTimeout(poll, 2000);
+      } catch {
+        setTimeout(poll, 2500);
+      }
+    };
+    poll();
+    return () => { cancel = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams.get("tip_session_id"), searchParams.get("tip_cancelled"), id]);
 
   const onPlay = async () => {
     setPlaying(true);
@@ -109,6 +156,11 @@ export default function MovieDetail() {
         <button onClick={onShare} className="px-5 py-3 rounded-full border border-white/15 text-white/80 hover:text-white flex items-center gap-2 transition" data-testid="share-btn">
           <Share2 className="w-4 h-4" /> Share
         </button>
+        {!isOwner && (
+          <button onClick={() => user ? setTipOpen(true) : nav("/auth")} className="px-5 py-3 rounded-full text-white flex items-center gap-2 transition crimson-glow" style={{background:"linear-gradient(90deg,#dc143c,#7a1bbf)"}} data-testid="tip-btn">
+            <Flame className="w-4 h-4" /> Tip the Forger
+          </button>
+        )}
         {isOwner && (
           <button onClick={onArchive} className="px-5 py-3 rounded-full border border-white/15 text-white/60 hover:text-white flex items-center gap-2 transition" data-testid="archive-btn">
             <ArchiveIcon className="w-4 h-4" /> {movie.archived ? "Restore" : "Archive"}
@@ -124,7 +176,7 @@ export default function MovieDetail() {
             <div><dt className="text-white/40 text-[10px] uppercase tracking-[0.2em]">Creator</dt><dd>{movie.creator_name}</dd></div>
             <div><dt className="text-white/40 text-[10px] uppercase tracking-[0.2em]">Rating</dt><dd>{avgRating} ({movie.rating_count})</dd></div>
             <div><dt className="text-white/40 text-[10px] uppercase tracking-[0.2em]">Watches</dt><dd>{Intl.NumberFormat("en", {notation:"compact"}).format(movie.watches||0)}</dd></div>
-            <div><dt className="text-white/40 text-[10px] uppercase tracking-[0.2em]">Origin</dt><dd>{movie.fork_of ? "Evolution" : "Original"}</dd></div>
+            <div><dt className="text-white/40 text-[10px] uppercase tracking-[0.2em]">Tips received</dt><dd data-testid="tip-stats">${tipStats.total.toFixed(2)} · {tipStats.count}</dd></div>
           </dl>
           <div className="mt-6 pt-6 border-t border-white/5">
             <div className="text-[10px] uppercase tracking-[0.25em] text-white/40 mb-2">Original prompt</div>
@@ -162,6 +214,8 @@ export default function MovieDetail() {
           </div>
         </section>
       )}
+
+      <TipDialog open={tipOpen} onClose={() => setTipOpen(false)} movie={movie} />
     </div>
   );
 }

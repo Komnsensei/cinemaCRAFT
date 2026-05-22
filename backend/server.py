@@ -15,6 +15,11 @@ from typing import List, Optional, Literal
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+from emergentintegrations.payments.stripe.checkout import (
+    StripeCheckout,
+    CheckoutSessionRequest,
+)
+from fastapi import Request
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -23,6 +28,15 @@ MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
+STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "")
+
+# Server-side fixed tip packages (NEVER trust frontend amounts)
+TIP_PACKAGES = {
+    "spark":   {"amount": 2.00,  "label": "Spark"},
+    "ember":   {"amount": 5.00,  "label": "Ember"},
+    "blaze":   {"amount": 10.00, "label": "Blaze"},
+    "inferno": {"amount": 25.00, "label": "Inferno"},
+}
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -440,6 +454,142 @@ async def ai_chat(body: ChatIn, user=Depends(optional_user)):
         "role": "assistant", "text": str(reply), "ts": now_iso(),
     })
     return {"session_id": session_id, "reply": str(reply)}
+
+
+# ---------- Tips (Stripe) ----------
+class TipCheckoutIn(BaseModel):
+    movie_id: str
+    package_id: str
+    origin_url: str
+
+
+@api.get("/tips/packages")
+async def tips_packages():
+    return [
+        {"id": k, "label": v["label"], "amount": v["amount"], "currency": "usd"}
+        for k, v in TIP_PACKAGES.items()
+    ]
+
+
+@api.post("/tips/checkout")
+async def tips_checkout(body: TipCheckoutIn, request: Request, user=Depends(get_current_user)):
+    if not STRIPE_API_KEY:
+        raise HTTPException(503, "Stripe not configured")
+    pkg = TIP_PACKAGES.get(body.package_id)
+    if not pkg:
+        raise HTTPException(400, "Invalid tip package")
+    movie = await db.movies.find_one({"id": body.movie_id}, {"_id": 0})
+    if not movie:
+        raise HTTPException(404, "Movie not found")
+    if movie["creator_id"] == user["id"]:
+        raise HTTPException(400, "You can't tip your own forge")
+
+    host_url = str(request.base_url)
+    webhook_url = f"{host_url.rstrip('/')}/api/webhook/stripe"
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+
+    origin = body.origin_url.rstrip("/")
+    success_url = f"{origin}/m/{body.movie_id}?tip_session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{origin}/m/{body.movie_id}?tip_cancelled=1"
+
+    req = CheckoutSessionRequest(
+        amount=float(pkg["amount"]),
+        currency="usd",
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata={
+            "tipper_id": user["id"],
+            "tipper_name": user["username"],
+            "creator_id": movie["creator_id"],
+            "movie_id": body.movie_id,
+            "package_id": body.package_id,
+        },
+    )
+    session = await stripe.create_checkout_session(req)
+
+    await db.payment_transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "session_id": session.session_id,
+        "tipper_id": user["id"],
+        "creator_id": movie["creator_id"],
+        "movie_id": body.movie_id,
+        "package_id": body.package_id,
+        "amount": pkg["amount"],
+        "currency": "usd",
+        "payment_status": "initiated",
+        "status": "open",
+        "credited": False,
+        "metadata": req.metadata,
+        "created_at": now_iso(),
+    })
+    return {"url": session.url, "session_id": session.session_id}
+
+
+async def _credit_tip(session_id: str, payment_status: str, status: str):
+    """Idempotently mark transaction paid and credit the creator."""
+    tx = await db.payment_transactions.find_one({"session_id": session_id})
+    if not tx:
+        return None
+    if tx.get("credited"):
+        return tx
+    update = {"payment_status": payment_status, "status": status, "updated_at": now_iso()}
+    if payment_status == "paid" and not tx.get("credited"):
+        update["credited"] = True
+        await db.movies.update_one(
+            {"id": tx["movie_id"]},
+            {"$inc": {"tips_count": 1, "tips_total_cents": int(tx["amount"] * 100)}},
+        )
+        await db.tips.insert_one({
+            "id": str(uuid.uuid4()),
+            "session_id": session_id,
+            "tipper_id": tx["tipper_id"],
+            "creator_id": tx["creator_id"],
+            "movie_id": tx["movie_id"],
+            "amount": tx["amount"],
+            "currency": tx.get("currency", "usd"),
+            "created_at": now_iso(),
+        })
+    await db.payment_transactions.update_one({"session_id": session_id}, {"$set": update})
+    return {**tx, **update}
+
+
+@api.get("/tips/status/{session_id}")
+async def tips_status(session_id: str):
+    if not STRIPE_API_KEY:
+        raise HTTPException(503, "Stripe not configured")
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
+    s = await stripe.get_checkout_status(session_id)
+    await _credit_tip(session_id, s.payment_status, s.status)
+    return {
+        "status": s.status,
+        "payment_status": s.payment_status,
+        "amount_total": s.amount_total,
+        "currency": s.currency,
+    }
+
+
+@api.post("/webhook/stripe")
+async def stripe_webhook(request: Request):
+    if not STRIPE_API_KEY:
+        raise HTTPException(503, "Stripe not configured")
+    body = await request.body()
+    sig = request.headers.get("Stripe-Signature", "")
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
+    try:
+        evt = await stripe.handle_webhook(body, sig)
+    except Exception as e:
+        log.exception("webhook failed")
+        raise HTTPException(400, f"Webhook error: {e}")
+    if evt.session_id:
+        await _credit_tip(evt.session_id, evt.payment_status, "complete")
+    return {"received": True}
+
+
+@api.get("/movies/{mid}/tips")
+async def movie_tips(mid: str):
+    tips = await db.tips.find({"movie_id": mid}, {"_id": 0}).sort("created_at", -1).limit(20).to_list(20)
+    total = sum(t["amount"] for t in tips)
+    return {"count": len(tips), "total": round(total, 2), "tips": tips}
 
 
 # ---------- Seed ----------
