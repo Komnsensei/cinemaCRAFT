@@ -46,7 +46,14 @@ export default function MovieDetail() {
     let cancel = false;
     let attempts = 0;
     const poll = async () => {
-      if (cancel || attempts >= 6) return;
+      if (cancel || attempts >= 6) {
+        if (!cancel) {
+          toast.message("Tip is processing — refresh in a moment to see it credited.");
+          searchParams.delete("tip_session_id");
+          setSearchParams(searchParams, { replace: true });
+        }
+        return;
+      }
       attempts++;
       try {
         const r = await api.get(`/tips/status/${sid}`);

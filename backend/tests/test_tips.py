@@ -125,22 +125,35 @@ def test_tips_status_unpaid_session(session):
     if not sid:
         pytest.skip("No session id from checkout test")
     r = session.get(f"{API}/tips/status/{sid}")
-    assert r.status_code == 200
+    # MUST NOT 500 — graceful fallback to db
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
     data = r.json()
     assert "status" in data
     assert "payment_status" in data
+    assert "source" in data, "Response must include 'source' field (stripe|db_fallback)"
+    assert data["source"] in ("stripe", "db_fallback")
     # Without completing payment, payment_status should NOT be 'paid'
     assert data["payment_status"] != "paid"
+    # For a just-created session, expect 'initiated' (or unpaid/open from stripe)
+    assert data["payment_status"] in ("initiated", "unpaid", "open", "no_payment_required"), \
+        f"Unexpected payment_status: {data['payment_status']}"
+
+
+def test_tips_status_not_found_returns_404(session):
+    """Non-existent session_id must return 404, not 500."""
+    fake_sid = f"cs_test_does_not_exist_{uuid.uuid4().hex}"
+    r = session.get(f"{API}/tips/status/{fake_sid}")
+    assert r.status_code == 404, f"Expected 404, got {r.status_code}: {r.text}"
 
 
 def test_tips_status_idempotent_does_not_double_credit(session, creator_movie):
     sid = getattr(pytest, "tip_session_id", None)
     if not sid:
         pytest.skip("No session id from checkout test")
-    # Call status multiple times
-    for _ in range(3):
+    # Call status 5 times - must remain idempotent and never 500
+    for i in range(5):
         r = session.get(f"{API}/tips/status/{sid}")
-        assert r.status_code == 200
+        assert r.status_code == 200, f"Iter {i}: expected 200, got {r.status_code}: {r.text}"
     # Movie should still have no successful tips since payment never completed
     tr = session.get(f"{API}/movies/{creator_movie['id']}/tips")
     assert tr.status_code == 200

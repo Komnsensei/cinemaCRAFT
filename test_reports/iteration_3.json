@@ -1,0 +1,54 @@
+{
+  "summary": "Re-tested the previously-failing GET /api/tips/status/{session_id} endpoint after the db_fallback fix. All 12 tips tests now pass (was 8/11). Full backend regression: 27/27 cinemaforge tests + 12/12 tips tests = 39/39 PASS. The critical 500 bug is resolved — tips_status now catches the Stripe proxy retrieval exception and returns 200 with source='db_fallback', payment_status='initiated' for just-created sessions. 404 is correctly returned for non-existent session IDs. Idempotency verified with 5 successive calls — no double-credit, count/total remain 0.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/tips/checkout",
+        "issue": "origin_url still taken from client — potential open-redirect via Stripe success/cancel URLs. Validate against an allow-list. (carried over from iteration_2, not in this fix scope)"
+      },
+      {
+        "endpoint": "POST /api/webhook/stripe",
+        "issue": "STRIPE_WEBHOOK_SECRET still not configured — signature effectively unverified in production. (carried over from iteration_2)"
+      },
+      {
+        "endpoint": "GET /api/tips/status/{session_id}",
+        "issue": "When falling back to DB, amount_total is recomputed as int(round(amount*100)); this works but reinforces the float-amount technical debt — switch backend to cents-int everywhere."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_tips.py",
+    "/app/backend/tests/test_cinemaforge.py",
+    "/app/test_reports/pytest/tips_results.xml",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Backend fix verified — no action required for the tips_status 500 bug.",
+    "(Carried over, low priority) Tighten origin_url validation in /api/tips/checkout.",
+    "(Carried over, low priority) Configure STRIPE_WEBHOOK_SECRET and pass it to StripeCheckout.",
+    "(Carried over, code-health) Migrate tip amounts to integer cents end-to-end."
+  ],
+  "critical_code_review_comments": [
+    "tips_status now correctly wraps the Stripe call in try/except and returns source='stripe' vs source='db_fallback' — clean and observable.",
+    "On db_fallback, response still calls into _credit_tip is skipped (correct — we never trust DB-only as 'paid'); crediting remains gated to either successful Stripe retrieve OR webhook delivery.",
+    "DB record is re-read inside the except block before constructing fallback — good, picks up any webhook-delivered update between the two reads.",
+    "server.py is now ~670 lines — still recommend splitting into routers (auth/movies/ai/tips/seed) for maintainability.",
+    "tips_status remains unauthenticated — any party with a session_id can trigger a Stripe retrieve attempt. Consider rate-limiting or auth."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_tips.py"
+  ],
+  "success_rate": {"backend": "100% (39/39: 27 cinemaforge + 12 tips)", "frontend": "not tested per request"},
+  "test_credentials": "Tests register fresh users dynamically: test_tip_<hex>@cinemaforge.io / Pass1234!",
+  "seed_data_creation": "Reused existing idempotent /api/seed (12 curator movies). Tests create transient users + one creator-owned movie per run.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "tips_status fix verified end-to-end. New test added: test_tips_status_not_found_returns_404 (404 path). Idempotency test bumped from 3 to 5 iterations per request. test_tips_status_unpaid_session now asserts source ∈ {stripe, db_fallback} and payment_status ∈ {initiated, unpaid, open, no_payment_required}. Frontend MovieDetail.jsx 'Tip is processing' toast was NOT tested per the explicit 'backend only' instruction in this iteration.",
+  "rca of the issue": "Original bug: emergent Stripe proxy supports POST /checkout/sessions but not GET /checkout/sessions/{id} for sk_test_emergent, so stripe.checkout.Session.retrieve raised InvalidRequestError, propagating as 500. Fix applied in /app/backend/server.py lines 564-585: wrap the StripeCheckout(...).get_checkout_status() call in try/except, on failure re-read the payment_transactions row and return 200 with source='db_fallback', payment_status='initiated' (or whatever the webhook stamped). 404 is preserved for genuinely unknown session_ids (checked BEFORE the Stripe call). Verified by running 12 tips tests + 27 cinemaforge regression tests — all green."
+}

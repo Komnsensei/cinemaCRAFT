@@ -557,15 +557,32 @@ async def _credit_tip(session_id: str, payment_status: str, status: str):
 async def tips_status(session_id: str):
     if not STRIPE_API_KEY:
         raise HTTPException(503, "Stripe not configured")
-    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
-    s = await stripe.get_checkout_status(session_id)
-    await _credit_tip(session_id, s.payment_status, s.status)
-    return {
-        "status": s.status,
-        "payment_status": s.payment_status,
-        "amount_total": s.amount_total,
-        "currency": s.currency,
-    }
+    tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    if not tx:
+        raise HTTPException(404, "Session not found")
+    # Try Stripe; in some test/proxy modes retrieval is not supported.
+    try:
+        stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
+        s = await stripe.get_checkout_status(session_id)
+        await _credit_tip(session_id, s.payment_status, s.status)
+        return {
+            "status": s.status,
+            "payment_status": s.payment_status,
+            "amount_total": s.amount_total,
+            "currency": s.currency,
+            "source": "stripe",
+        }
+    except Exception as e:
+        log.warning("stripe status retrieve failed: %s — falling back to DB", e)
+        # Re-read in case webhook updated it
+        tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+        return {
+            "status": tx.get("status", "open"),
+            "payment_status": tx.get("payment_status", "initiated"),
+            "amount_total": int(round(float(tx.get("amount", 0)) * 100)),
+            "currency": tx.get("currency", "usd"),
+            "source": "db_fallback",
+        }
 
 
 @api.post("/webhook/stripe")
