@@ -30,6 +30,17 @@
 - ✅ Provider-keys UI (Sora 2 / Veo / Runway / ElevenLabs) ready for the user to drop in keys.
 - ✅ 100% backend + frontend test coverage by testing subagent.
 
+## What's been implemented (2026-02-22 — v1.1: Tip the Forger)
+- ✅ Stripe checkout integration via emergentintegrations + sk_test_emergent.
+- ✅ 4 server-defined tip packages: Spark $2, Ember $5, Blaze $10, Inferno $25.
+- ✅ POST /api/tips/checkout (auth-gated, blocks self-tips, creates payment_transactions row).
+- ✅ GET /api/tips/status/{session_id} with graceful Stripe-proxy fallback to DB (no 500s).
+- ✅ POST /api/webhook/stripe handles webhook events; _credit_tip is idempotent.
+- ✅ GET /api/movies/{id}/tips returns count + total.
+- ✅ TipDialog component + Tip button on Movie Detail (visible only to non-owners).
+- ✅ Frontend polls /tips/status after Stripe redirect; shows graceful "processing" toast on timeout.
+- ✅ All 39/39 backend tests + 100% frontend tests pass.
+
 ## Backlog (prioritized)
 ### P0
 - Hydrate `liked` and `rating` state on MovieDetail from server (currently starts fresh per visit).
