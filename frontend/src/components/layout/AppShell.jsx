@@ -2,7 +2,7 @@ import { Outlet, NavLink, useNavigate } from "react-router-dom";
 import { useState } from "react";
 import {
   Home, Compass, Trophy, Sparkles, Search, Archive, Clock,
-  Film, FolderOpen, User, Settings, FileCode, LogOut, MessageCircle, Menu
+  Film, FolderOpen, User, Settings, FileCode, LogOut, MessageCircle, Menu, Store
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import AIChatDock from "@/components/ai/AIChatDock";
@@ -10,6 +10,7 @@ import AIChatDock from "@/components/ai/AIChatDock";
 const navItems = [
   { to: "/", label: "For You", icon: Home, tid: "nav-home" },
   { to: "/browse", label: "Browse", icon: Compass, tid: "nav-browse" },
+  { to: "/marketplace", label: "Marketplace", icon: Store, tid: "nav-marketplace" },
   { to: "/leaderboard", label: "Leaderboard", icon: Trophy, tid: "nav-leaderboard" },
   { to: "/whats-new", label: "What's New", icon: Sparkles, tid: "nav-new" },
   { to: "/coming-soon", label: "Coming Soon", icon: Clock, tid: "nav-coming-soon" },

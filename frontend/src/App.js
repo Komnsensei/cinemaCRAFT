@@ -9,6 +9,8 @@ import WhatsNew from "@/pages/WhatsNew";
 import Search from "@/pages/Search";
 import Archive from "@/pages/Archive";
 import ComingSoon from "@/pages/ComingSoon";
+import Marketplace from "@/pages/Marketplace";
+import AssetDetail from "@/pages/AssetDetail";
 import Create from "@/pages/Create";
 import Creations from "@/pages/Creations";
 import MovieDetail from "@/pages/MovieDetail";
@@ -47,6 +49,8 @@ function App() {
               <Route path="/search" element={<Search />} />
               <Route path="/archive" element={<Archive />} />
               <Route path="/coming-soon" element={<ComingSoon />} />
+              <Route path="/marketplace" element={<Marketplace />} />
+              <Route path="/marketplace/:kind/:id" element={<AssetDetail />} />
               <Route path="/create" element={<Protected><Create /></Protected>} />
               <Route path="/creations" element={<Protected><Creations /></Protected>} />
               <Route path="/m/:id" element={<MovieDetail />} />

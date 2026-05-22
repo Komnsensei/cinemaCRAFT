@@ -46,8 +46,11 @@ def test_seed_idempotent(session):
     r2 = session.post(f"{API}/seed")
     assert r1.status_code == 200
     assert r2.status_code == 200
-    # second call should be skipped
-    assert r2.json().get("skipped") is True
+    # After iteration_4 refactor, /api/seed always runs (to also seed
+    # characters/worlds). It should be idempotent in effect: second call
+    # inserts no new movies. We no longer expect a `skipped` flag.
+    assert r2.json().get("ok") is True
+    assert r2.json().get("inserted", 0) == 0
 
 
 # ---------- Auth ----------

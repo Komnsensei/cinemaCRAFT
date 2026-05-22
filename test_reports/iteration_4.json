@@ -1,0 +1,72 @@
+{
+  "summary": "End-to-end testing of new Marketplace feature (AI Characters & Worlds + 4-tier licensing + Creator Earnings). Backend: 63/63 tests passing (27 cinemaforge + 24 new marketplace + 12 tips). Frontend: full marketplace browse → asset detail → license checkout flow verified, including unauth redirect to /auth, authed redirect to checkout.stripe.com, cancelled-toast on ?license_cancelled=1, and Profile /earnings/licenses tabs with $0 stat cards + disabled withdraw button. One small regression fixed in test_cinemaforge.py (seed no longer returns 'skipped' — it now always runs to seed characters/worlds and reports inserted=0 on idempotent calls). No critical bugs found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/characters, POST /api/worlds",
+        "issue": "No input validation on image_url (a bare string like 'https://x' passes). Consider HttpUrl / regex validation to avoid broken cards on the marketplace grid."
+      },
+      {
+        "endpoint": "GET /api/characters, GET /api/worlds",
+        "issue": "No pagination or filtering by creator / tags / search yet. Hard-coded limit=60. Will not scale past a few hundred assets."
+      },
+      {
+        "endpoint": "POST /api/licenses/checkout",
+        "issue": "origin_url is trusted (open-redirect via Stripe success/cancel URLs); also carried over from tips. Validate against an allow-list."
+      },
+      {
+        "endpoint": "POST /api/webhook/stripe",
+        "issue": "STRIPE_WEBHOOK_SECRET still not configured — signature effectively unverified in production (carried over)."
+      },
+      {
+        "endpoint": "GET /api/licenses/status/{session_id}",
+        "issue": "Unauthenticated — any party with a session_id can trigger a Stripe retrieve attempt. Same concern as /api/tips/status."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Marketplace grid", "issues": ["TEST_-prefixed user-generated characters (with image_url='https://x') show broken hero images. Not a real-user bug, just test artefact pollution. Suggest backend validation of image_url to prevent broken cards from non-test users."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_marketplace.py",
+    "/app/backend/tests/test_cinemaforge.py",
+    "/app/backend/tests/test_tips.py",
+    "/app/test_reports/pytest/marketplace_results.xml",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Optional, code-health) Validate image_url with HttpUrl on POST /api/characters and POST /api/worlds.",
+    "(Optional) Add pagination + filter (creator, tags, search) to /api/characters and /api/worlds.",
+    "(Carried over) Tighten origin_url validation on /api/licenses/checkout and /api/tips/checkout.",
+    "(Carried over) Configure STRIPE_WEBHOOK_SECRET.",
+    "(Carried over) server.py is now ~975 lines — split into routers (auth/movies/ai/tips/marketplace/seed).",
+    "Consider rate-limiting / auth on /api/licenses/status."
+  ],
+  "critical_code_review_comments": [
+    "_credit_license is parallel to _credit_tip — clean, idempotent (gated on tx.credited flag), and only increments asset.license_count when payment_status=='paid'. Looks correct.",
+    "Webhook handler now correctly branches on tx.kind ('tip' vs 'license') — fallback default of 'tip' is acceptable for legacy rows.",
+    "/api/licenses/checkout correctly blocks creators from buying their own asset (400). Good.",
+    "/api/licenses/status uses the same try/except db_fallback pattern as tips_status — consistent with prior fix.",
+    "server.py has grown to 975 lines — split into multiple routers is now overdue for maintainability.",
+    "Frontend AssetDetail.jsx polls /licenses/status up to 6 times after Stripe return — same pattern as MovieDetail tip flow. Toast 'License is processing' shown if not paid by attempt 6 — graceful.",
+    "Profile.jsx Earnings tab cleanly renders 3 stat cards + 2 recent-transaction lists with empty-state messaging; Withdraw button correctly disabled when grand_total <= 0.",
+    "No race condition between status poll and webhook because _credit_license short-circuits if credited already true.",
+    "Earnings endpoint hydrates asset name/image for license rows but not for tip rows — minor inconsistency (tips show only movie_id in the UI list)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_marketplace.py (new, 24 tests)",
+    "/app/backend/tests/test_cinemaforge.py (updated test_seed_idempotent to match new always-run-seed behaviour)"
+  ],
+  "success_rate": {"backend": "100% (63/63: 27 cinemaforge + 24 marketplace + 12 tips)", "frontend": "100% on all tested flows (sidebar nav, grid, tabs, asset detail, tier picker, unauth redirect, authed → stripe.com, cancel toast, profile tabs, earnings cards, withdraw disabled)"},
+  "test_credentials": "Tests register fresh users dynamically: test_buyer_<hex>@cinemaforge.io / test_seller_<hex>@cinemaforge.io / Pass1234!. UI test created test_ui_<8chars>@cinemaforge.io.",
+  "seed_data_creation": "Reused /api/seed (now idempotent for movies AND characters AND worlds). Backend tests created transient seller-owned characters/worlds and one buyer license checkout session (not paid).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All marketplace endpoints verified: GET /api/characters (>=8), GET /api/worlds (>=6), GET/POST detail/create, /api/marketplace/tiers (4+4 with correct amounts 3/8/15/40 and 5/15/25/75), /api/licenses/checkout (auth, 400 on own-asset/bad-tier/bad-type, 404 unknown asset, returns stripe url), /api/licenses/status (200 + db_fallback for fresh session, 404 for unknown, idempotent on 5 calls), /api/licenses/my (auth required, empty for new user), /api/creator/earnings (zero for new user, correct shape). Webhook routing tested only indirectly via test_stripe_webhook_handles_bad_signature in tips (signature rejection); paid-flow not exercised because checkout was never completed. Frontend: marketplace-page, mkt-tab-{characters,worlds}, mkt-card-*, asset-detail-*, tier-picker, tier-{one_time,series,feature,lifetime}, license-confirm, profile-tabs, tab-{forges,earnings,licenses}, earnings-grid, earn-{tips,licenses,total}, withdraw-btn, nav-marketplace — all confirmed.",
+  "rca of the issue": "Only one pre-existing test broke (test_seed_idempotent) because the iteration_4 seed refactor intentionally drops the `skipped: True` short-circuit so the route can run the character/world seed block even after movies were already inserted. Test updated to assert {ok: True, inserted: 0} instead. No code bug."
+}

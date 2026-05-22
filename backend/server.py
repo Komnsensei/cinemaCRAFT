@@ -38,6 +38,21 @@ TIP_PACKAGES = {
     "inferno": {"amount": 25.00, "label": "Inferno"},
 }
 
+# License pricing per asset type — fixed server-side
+CHARACTER_LICENSE_TIERS = {
+    "one_time": {"amount": 3.00,  "label": "One-Time Use",   "blurb": "Cast in a single forge."},
+    "series":   {"amount": 8.00,  "label": "Series Pass",    "blurb": "Unlimited series-length use."},
+    "feature":  {"amount": 15.00, "label": "Feature License","blurb": "Unlimited feature-length use."},
+    "lifetime": {"amount": 40.00, "label": "Lifetime",       "blurb": "Any format, any forge, forever."},
+}
+WORLD_LICENSE_TIERS = {
+    "one_time": {"amount": 5.00,  "label": "One-Time Visit", "blurb": "Set a single forge in this world."},
+    "series":   {"amount": 15.00, "label": "Series Pass",    "blurb": "Unlimited series in this world."},
+    "feature":  {"amount": 25.00, "label": "Feature License","blurb": "Unlimited features in this world."},
+    "lifetime": {"amount": 75.00, "label": "Lifetime Deed",  "blurb": "Inhabit forever, any format."},
+}
+LICENSE_TIERS = {"character": CHARACTER_LICENSE_TIERS, "world": WORLD_LICENSE_TIERS}
+
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
@@ -509,6 +524,7 @@ async def tips_checkout(body: TipCheckoutIn, request: Request, user=Depends(get_
 
     await db.payment_transactions.insert_one({
         "id": str(uuid.uuid4()),
+        "kind": "tip",
         "session_id": session.session_id,
         "tipper_id": user["id"],
         "creator_id": movie["creator_id"],
@@ -598,7 +614,12 @@ async def stripe_webhook(request: Request):
         log.exception("webhook failed")
         raise HTTPException(400, f"Webhook error: {e}")
     if evt.session_id:
-        await _credit_tip(evt.session_id, evt.payment_status, "complete")
+        tx = await db.payment_transactions.find_one({"session_id": evt.session_id})
+        kind = (tx or {}).get("kind", "tip")
+        if kind == "license":
+            await _credit_license(evt.session_id, evt.payment_status, "complete")
+        else:
+            await _credit_tip(evt.session_id, evt.payment_status, "complete")
     return {"received": True}
 
 
@@ -609,13 +630,255 @@ async def movie_tips(mid: str):
     return {"count": len(tips), "total": round(total, 2), "tips": tips}
 
 
+# ---------- Marketplace: Characters & Worlds ----------
+class AssetCreateIn(BaseModel):
+    name: str
+    tagline: str
+    description: str
+    image_url: str
+    tags: List[str] = []
+    # character-specific
+    vibe: Optional[str] = None
+    voice: Optional[str] = None
+    # world-specific
+    era: Optional[str] = None
+    palette: Optional[str] = None
+
+
+class LicenseCheckoutIn(BaseModel):
+    asset_type: str  # "character" | "world"
+    asset_id: str
+    tier: str        # "one_time" | "series" | "feature" | "lifetime"
+    origin_url: str
+
+
+def _asset_collection(asset_type: str):
+    if asset_type == "character":
+        return db.characters
+    if asset_type == "world":
+        return db.worlds
+    return None
+
+
+@api.get("/marketplace/tiers")
+async def marketplace_tiers():
+    return {
+        "character": [{"id": k, **v} for k, v in CHARACTER_LICENSE_TIERS.items()],
+        "world": [{"id": k, **v} for k, v in WORLD_LICENSE_TIERS.items()],
+    }
+
+
+@api.get("/characters")
+async def list_characters(limit: int = 60):
+    return await db.characters.find({}, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+
+
+@api.get("/worlds")
+async def list_worlds(limit: int = 60):
+    return await db.worlds.find({}, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+
+
+@api.get("/characters/{aid}")
+async def get_character(aid: str):
+    a = await db.characters.find_one({"id": aid}, {"_id": 0})
+    if not a:
+        raise HTTPException(404, "Character not found")
+    return a
+
+
+@api.get("/worlds/{aid}")
+async def get_world(aid: str):
+    a = await db.worlds.find_one({"id": aid}, {"_id": 0})
+    if not a:
+        raise HTTPException(404, "World not found")
+    return a
+
+
+@api.post("/characters")
+async def create_character(body: AssetCreateIn, user=Depends(get_current_user)):
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": body.name, "tagline": body.tagline, "description": body.description,
+        "image_url": body.image_url, "tags": body.tags,
+        "vibe": body.vibe, "voice": body.voice,
+        "creator_id": user["id"], "creator_name": user["username"],
+        "license_count": 0, "license_total_cents": 0,
+        "created_at": now_iso(),
+    }
+    await db.characters.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.post("/worlds")
+async def create_world(body: AssetCreateIn, user=Depends(get_current_user)):
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": body.name, "tagline": body.tagline, "description": body.description,
+        "image_url": body.image_url, "tags": body.tags,
+        "era": body.era, "palette": body.palette,
+        "creator_id": user["id"], "creator_name": user["username"],
+        "license_count": 0, "license_total_cents": 0,
+        "created_at": now_iso(),
+    }
+    await db.worlds.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.post("/licenses/checkout")
+async def licenses_checkout(body: LicenseCheckoutIn, request: Request, user=Depends(get_current_user)):
+    if not STRIPE_API_KEY:
+        raise HTTPException(503, "Stripe not configured")
+    if body.asset_type not in LICENSE_TIERS:
+        raise HTTPException(400, "Invalid asset type")
+    tiers = LICENSE_TIERS[body.asset_type]
+    tier = tiers.get(body.tier)
+    if not tier:
+        raise HTTPException(400, "Invalid tier")
+    coll = _asset_collection(body.asset_type)
+    asset = await coll.find_one({"id": body.asset_id}, {"_id": 0})
+    if not asset:
+        raise HTTPException(404, f"{body.asset_type} not found")
+    if asset["creator_id"] == user["id"]:
+        raise HTTPException(400, "You already own your own asset")
+
+    host_url = str(request.base_url)
+    webhook_url = f"{host_url.rstrip('/')}/api/webhook/stripe"
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    origin = body.origin_url.rstrip("/")
+    success_url = f"{origin}/marketplace/{body.asset_type}/{body.asset_id}?license_session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{origin}/marketplace/{body.asset_type}/{body.asset_id}?license_cancelled=1"
+
+    req = CheckoutSessionRequest(
+        amount=float(tier["amount"]),
+        currency="usd",
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata={
+            "buyer_id": user["id"],
+            "buyer_name": user["username"],
+            "creator_id": asset["creator_id"],
+            "asset_type": body.asset_type,
+            "asset_id": body.asset_id,
+            "tier": body.tier,
+        },
+    )
+    session = await stripe.create_checkout_session(req)
+    await db.payment_transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "kind": "license",
+        "session_id": session.session_id,
+        "buyer_id": user["id"],
+        "creator_id": asset["creator_id"],
+        "asset_type": body.asset_type,
+        "asset_id": body.asset_id,
+        "tier": body.tier,
+        "amount": tier["amount"],
+        "currency": "usd",
+        "payment_status": "initiated",
+        "status": "open",
+        "credited": False,
+        "metadata": req.metadata,
+        "created_at": now_iso(),
+    })
+    return {"url": session.url, "session_id": session.session_id}
+
+
+async def _credit_license(session_id: str, payment_status: str, status: str):
+    tx = await db.payment_transactions.find_one({"session_id": session_id})
+    if not tx or tx.get("credited"):
+        return tx
+    update = {"payment_status": payment_status, "status": status, "updated_at": now_iso()}
+    if payment_status == "paid" and not tx.get("credited"):
+        update["credited"] = True
+        coll = _asset_collection(tx["asset_type"])
+        if coll is not None:
+            await coll.update_one(
+                {"id": tx["asset_id"]},
+                {"$inc": {"license_count": 1, "license_total_cents": int(tx["amount"] * 100)}},
+            )
+        await db.licenses.insert_one({
+            "id": str(uuid.uuid4()),
+            "session_id": session_id,
+            "buyer_id": tx["buyer_id"],
+            "creator_id": tx["creator_id"],
+            "asset_type": tx["asset_type"],
+            "asset_id": tx["asset_id"],
+            "tier": tx["tier"],
+            "amount": tx["amount"],
+            "used_in_movie_id": None,
+            "created_at": now_iso(),
+        })
+    await db.payment_transactions.update_one({"session_id": session_id}, {"$set": update})
+    return {**tx, **update}
+
+
+@api.get("/licenses/status/{session_id}")
+async def licenses_status(session_id: str):
+    if not STRIPE_API_KEY:
+        raise HTTPException(503, "Stripe not configured")
+    tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    if not tx:
+        raise HTTPException(404, "Session not found")
+    try:
+        stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
+        s = await stripe.get_checkout_status(session_id)
+        await _credit_license(session_id, s.payment_status, s.status)
+        return {"status": s.status, "payment_status": s.payment_status, "amount_total": s.amount_total, "currency": s.currency, "source": "stripe"}
+    except Exception as e:
+        log.warning("stripe license status retrieve failed: %s", e)
+        tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+        return {
+            "status": tx.get("status", "open"),
+            "payment_status": tx.get("payment_status", "initiated"),
+            "amount_total": int(round(float(tx.get("amount", 0)) * 100)),
+            "currency": tx.get("currency", "usd"),
+            "source": "db_fallback",
+        }
+
+
+@api.get("/licenses/my")
+async def my_licenses(user=Depends(get_current_user)):
+    rows = await db.licenses.find({"buyer_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    # hydrate asset names
+    for r in rows:
+        coll = _asset_collection(r["asset_type"])
+        if coll is not None:
+            asset = await coll.find_one({"id": r["asset_id"]}, {"_id": 0, "name": 1, "image_url": 1, "tagline": 1, "creator_name": 1})
+            if asset:
+                r["asset"] = asset
+    return rows
+
+
+@api.get("/creator/earnings")
+async def creator_earnings(user=Depends(get_current_user)):
+    uid = user["id"]
+    tip_rows = await db.tips.find({"creator_id": uid}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    lic_rows = await db.licenses.find({"creator_id": uid}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    # hydrate license asset info
+    for r in lic_rows:
+        coll = _asset_collection(r["asset_type"])
+        if coll is not None:
+            asset = await coll.find_one({"id": r["asset_id"]}, {"_id": 0, "name": 1, "image_url": 1})
+            if asset:
+                r["asset"] = asset
+    tip_total = round(sum(t["amount"] for t in tip_rows), 2)
+    lic_total = round(sum(r["amount"] for r in lic_rows), 2)
+    return {
+        "tips": {"count": len(tip_rows), "total": tip_total, "recent": tip_rows[:10]},
+        "licenses": {"count": len(lic_rows), "total": lic_total, "recent": lic_rows[:10]},
+        "grand_total": round(tip_total + lic_total, 2),
+    }
+
+
 # ---------- Seed ----------
 @api.post("/seed")
 async def seed():
-    if await db.movies.count_documents({}) > 0:
-        return {"ok": True, "skipped": True}
-    # create a system creator
+    seeds = []
     sys_id = "system-curator"
+    movies_exist = await db.movies.count_documents({}) > 0
+    # create a system creator
     await db.users.update_one(
         {"id": sys_id},
         {"$setOnInsert": {
@@ -625,31 +888,73 @@ async def seed():
         }},
         upsert=True,
     )
-    seeds = []
-    import random
-    random.seed(42)
-    for i, p in enumerate(TRENDING_PROMPTS):
-        for j, length in enumerate(["trailer", "short25", "episode45", "feature90"]):
-            if (i + j) % 2 == 0 and j > 0:
-                continue
-            data = MovieCreateIn(
-                title=p["title"] if j == 0 else f"{p['title']} — {length.upper()}",
-                prompt=p["blurb"],
-                genre=p["genre"],
-                length=length,
-                format="series" if j >= 2 else "movie",
-                actors=[a["id"] for a in random.sample(ACTORS_POOL, k=random.randint(2, 3))],
-                coming_soon=(j == 3 and i % 3 == 0),
-            )
-            doc = await _movie_doc(sys_id, "Curator", data)
-            doc["likes"] = random.randint(120, 9800)
-            doc["watches"] = random.randint(2000, 220000)
-            doc["clicks"] = random.randint(5000, 480000)
-            doc["rating_count"] = random.randint(80, 4200)
-            doc["rating_sum"] = doc["rating_count"] * random.randint(3, 5)
-            seeds.append(doc)
-    if seeds:
-        await db.movies.insert_many(seeds)
+
+    if not movies_exist:
+        import random
+        random.seed(42)
+        for i, p in enumerate(TRENDING_PROMPTS):
+            for j, length in enumerate(["trailer", "short25", "episode45", "feature90"]):
+                if (i + j) % 2 == 0 and j > 0:
+                    continue
+                data = MovieCreateIn(
+                    title=p["title"] if j == 0 else f"{p['title']} — {length.upper()}",
+                    prompt=p["blurb"],
+                    genre=p["genre"],
+                    length=length,
+                    format="series" if j >= 2 else "movie",
+                    actors=[a["id"] for a in random.sample(ACTORS_POOL, k=random.randint(2, 3))],
+                    coming_soon=(j == 3 and i % 3 == 0),
+                )
+                doc = await _movie_doc(sys_id, "Curator", data)
+                doc["likes"] = random.randint(120, 9800)
+                doc["watches"] = random.randint(2000, 220000)
+                doc["clicks"] = random.randint(5000, 480000)
+                doc["rating_count"] = random.randint(80, 4200)
+                doc["rating_sum"] = doc["rating_count"] * random.randint(3, 5)
+                seeds.append(doc)
+        if seeds:
+            await db.movies.insert_many(seeds)
+
+    # Seed marketplace characters
+    if await db.characters.count_documents({}) == 0:
+        chars = [
+            {"name": "Helios Vyn", "tagline": "Synth-messianic broadcaster of the End Channel.", "description": "A copper-armored AI televangelist who only appears on dead frequencies. Speaks in cinematic monologue.", "image_url": "https://images.unsplash.com/photo-1531123897727-8f129e1688ce?crop=entropy&cs=srgb&fm=jpg&w=600&q=80", "tags": ["scifi","oracle","male"], "vibe": "Messianic, oracular", "voice": "Velvet baritone with static"},
+            {"name": "Aria Solstice", "tagline": "The synth-pop ghost of the algorithm.", "description": "A diva who refuses to stop trending after her death. Performs in mirrored rooms.", "image_url": "https://images.unsplash.com/photo-1544005313-94ddf0286df2?crop=entropy&cs=srgb&fm=jpg&w=600&q=80", "tags": ["popstar","ghost","female"], "vibe": "Ethereal, mournful", "voice": "Cracked alto, autotuned breath"},
+            {"name": "Detective Mox Ren", "tagline": "Cyber-noir PI in a city of forgetting.", "description": "Has 14 unsolved memory-theft cases tattooed on his ribs. Smokes synth-tobacco. Always alone.", "image_url": "https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?crop=entropy&cs=srgb&fm=jpg&w=600&q=80", "tags": ["noir","detective","male"], "vibe": "Brooding, dry-wit", "voice": "Gravel, clipped"},
+            {"name": "Lady Crimson Ada", "tagline": "Victorian alchemist with a forbidden formula.", "description": "Brews tinctures that bend mirrors. Lives at the edge of a marsh. Hates being interrupted.", "image_url": "https://images.unsplash.com/photo-1607746882042-944635dfe10e?crop=entropy&cs=srgb&fm=jpg&w=600&q=80", "tags": ["historical","alchemy","female"], "vibe": "Imperious, secret-keeping", "voice": "Cut-glass British"},
+            {"name": "Captain Zoya Black", "tagline": "Renegade starship captain, wanted in twelve systems.", "description": "Lost her crew to a black hole. Hunts the bounty hunter who set her up. Drinks black coffee in zero-g.", "image_url": "https://images.unsplash.com/photo-1438761681033-6461ffad8d80?crop=entropy&cs=srgb&fm=jpg&w=600&q=80", "tags": ["scifi","captain","female"], "vibe": "Defiant, scarred", "voice": "Low, commanding"},
+            {"name": "The Pale Twins", "tagline": "Conjoined oracle siblings who finish each other's prophecies.", "description": "Born during an eclipse. Speak in alternating syllables. Always know what's coming, never tell.", "image_url": "https://images.unsplash.com/photo-1606143412458-acc5f86de897?crop=entropy&cs=srgb&fm=jpg&w=600&q=80", "tags": ["strange","oracle","duo"], "vibe": "Unsettling, lyrical", "voice": "Whispered duet"},
+            {"name": "Father Glass", "tagline": "A time-broken priest who confesses to himself.", "description": "Existed in 1888, 1972, and 2104 simultaneously. His robes contain pressed flowers from each.", "image_url": "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?crop=entropy&cs=srgb&fm=jpg&w=600&q=80", "tags": ["historical","clergy","male"], "vibe": "Haunted, gentle", "voice": "Soft, weathered"},
+            {"name": "Niko Reign", "tagline": "Street-racing prodigy with a tragic surname.", "description": "Bones full of titanium. Reflexes faster than law allows. Owes a debt to the wrong syndicate.", "image_url": "https://images.unsplash.com/photo-1587397845856-e6cf49176c70?crop=entropy&cs=srgb&fm=jpg&w=600&q=80", "tags": ["action","racer","nonbinary"], "vibe": "Reckless, magnetic", "voice": "Wired tenor"},
+        ]
+        for c in chars:
+            c["id"] = str(uuid.uuid4())
+            c["creator_id"] = sys_id
+            c["creator_name"] = "Curator"
+            c["license_count"] = 0
+            c["license_total_cents"] = 0
+            c["created_at"] = now_iso()
+        await db.characters.insert_many(chars)
+
+    # Seed marketplace worlds
+    if await db.worlds.count_documents({}) == 0:
+        worlds = [
+            {"name": "Neon Sprawl", "tagline": "Cyberpunk megacity where the sun never wins.", "description": "A vertical city of mirrored rain and analog smoke. Holographic gods sell loyalty by the second.", "image_url": "https://images.unsplash.com/photo-1485846234645-a62644f84728?crop=entropy&cs=srgb&fm=jpg&w=900&q=85", "tags": ["cyberpunk","city","scifi"], "era": "2099", "palette": "Magenta · cyan · black"},
+            {"name": "The Mars Foothold", "tagline": "Last human outpost after Earth went dark.", "description": "Twelve airlocks. Two greenhouses. One radio that hasn't worked in eight years. Iron-red horizons.", "image_url": "https://images.unsplash.com/photo-1502134249126-9f3755a50d78?crop=entropy&cs=srgb&fm=jpg&w=900&q=85", "tags": ["scifi","mars","survival"], "era": "2147", "palette": "Rust · bone · indigo"},
+            {"name": "Velvet Lisbon, 1888", "tagline": "Alchemy, lacework, and slow-burning secrets.", "description": "Cobblestones glossed with rain. Cafés that close at midnight and open again at midnight. Forbidden chemistry behind every door.", "image_url": "https://images.unsplash.com/photo-1542204165-65bf26472b9b?crop=entropy&cs=srgb&fm=jpg&w=900&q=85", "tags": ["historical","romance","drama"], "era": "1888", "palette": "Crimson · cream · gold"},
+            {"name": "Saturn's Last Express", "tagline": "An interplanetary train across the ring system.", "description": "Forty-one cars. Six classes. Two assassins. The view from the panoramic dome is the only thing that doesn't lie.", "image_url": "https://images.unsplash.com/photo-1517604931442-7e0c8ed2963c?crop=entropy&cs=srgb&fm=jpg&w=900&q=85", "tags": ["scifi","action","mystery"], "era": "2210", "palette": "Brass · violet · ice"},
+            {"name": "Black Reef Abyss", "tagline": "Eleven kilometers down, where patience lives.", "description": "Bioluminescent. Hungry. Old. Drillers were warned. The signals coming back aren't human anymore.", "image_url": "https://images.unsplash.com/photo-1604147706283-d7119b5b822c?crop=entropy&cs=srgb&fm=jpg&w=900&q=85", "tags": ["horror","ocean","strange"], "era": "near-future", "palette": "Black · phosphor green · bone"},
+            {"name": "Algorithm Cathedral", "tagline": "A sentient datacenter that worships itself.", "description": "Server racks shaped like pews. The air hums in F-sharp minor. Every prayer is logged, indexed, and answered probabilistically.", "image_url": "https://images.unsplash.com/photo-1626814026160-2237a95fc5a0?crop=entropy&cs=srgb&fm=jpg&w=900&q=85", "tags": ["strange-ai","interior","drama"], "era": "post-network", "palette": "Violet · obsidian · static white"},
+        ]
+        for w in worlds:
+            w["id"] = str(uuid.uuid4())
+            w["creator_id"] = sys_id
+            w["creator_name"] = "Curator"
+            w["license_count"] = 0
+            w["license_total_cents"] = 0
+            w["created_at"] = now_iso()
+        await db.worlds.insert_many(worlds)
+
     return {"ok": True, "inserted": len(seeds)}
 
 
