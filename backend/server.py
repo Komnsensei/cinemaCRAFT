@@ -20,6 +20,17 @@ from emergentintegrations.payments.stripe.checkout import (
     CheckoutSessionRequest,
 )
 from fastapi import Request
+from gcloud_integration import (
+    generate_poster,
+    generate_video,
+    generate_scene_description,
+    enhance_movie_prompt,
+)
+from llm_brain import (
+    chat_with_forge,
+    get_forge_suggestion,
+    FORGE_SYSTEM_PROMPT,
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -29,6 +40,12 @@ DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
 STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "")
+
+# Google Cloud configuration
+GOOGLE_GENAI_API_KEY = os.environ.get("GOOGLE_GENAI_API_KEY", "")
+GOOGLE_CLOUD_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+GOOGLE_CLOUD_LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+GOOGLE_GENAI_USE_VERTEXAI = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "false").lower() == "true"
 
 # Server-side fixed tip packages (NEVER trust frontend amounts)
 TIP_PACKAGES = {
@@ -131,6 +148,22 @@ class RateIn(BaseModel):
 class ChatIn(BaseModel):
     message: str
     session_id: Optional[str] = None
+
+
+class PosterGenerationIn(BaseModel):
+    movie_id: str
+    prompt: str
+    aspect_ratio: str = "9:16"  # 9:16, 16:9, 1:1, etc.
+
+
+class VideoGenerationIn(BaseModel):
+    movie_id: str
+    prompt: str
+    duration_seconds: int = 6  # 6-60 seconds
+
+
+class PromptEnhancementIn(BaseModel):
+    raw_prompt: str
 
 
 # ---------- Auth ----------
@@ -433,32 +466,49 @@ async def archive_movie(mid: str, user=Depends(get_current_user)):
 
 
 # ---------- AI Chat ----------
-SYSTEM_PROMPT = (
-    "You are FORGE, the in-app AI director assistant for CinemaForge — a Netflix-style "
-    "platform where users create their own AI movies. Help them: (1) refine prompts into "
-    "cinematic loglines, (2) pick actors, (3) outline trailers/episodes/features, (4) suggest "
-    "genres and tone, (5) debug 'broken chains' in their creation flow. Be concise, cinematic, "
-    "and concrete. Use bullet points and short scene beats when useful. Lean into the dark "
-    "crimson-violet aesthetic of the app."
-)
+# FORGE system prompt is now defined in llm_brain.py
 
 
 @api.post("/ai/chat")
 async def ai_chat(body: ChatIn, user=Depends(optional_user)):
-    if not EMERGENT_LLM_KEY:
-        raise HTTPException(503, "AI key not configured")
-    session_id = body.session_id or str(uuid.uuid4())
-    try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=session_id,
-            system_message=SYSTEM_PROMPT,
-        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-        reply = await chat.send_message(UserMessage(text=body.message))
-    except Exception as e:
-        log.exception("AI chat failed")
-        raise HTTPException(500, f"AI error: {e}")
-    # persist
+    """Chat with FORGE, the AI director assistant."""
+    if not GOOGLE_GENAI_API_KEY and not GOOGLE_GENAI_USE_VERTEXAI:
+        # Fall back to Emergent LLM if Google Cloud not configured
+        if not EMERGENT_LLM_KEY:
+            raise HTTPException(503, "AI key not configured")
+        session_id = body.session_id or str(uuid.uuid4())
+        try:
+            chat = LlmChat(
+                api_key=EMERGENT_LLM_KEY,
+                session_id=session_id,
+                system_message=FORGE_SYSTEM_PROMPT,
+            ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+            reply = await chat.send_message(UserMessage(text=body.message))
+        except Exception as e:
+            log.exception("AI chat failed")
+            raise HTTPException(500, f"AI error: {e}")
+    else:
+        # Use Gemini-powered FORGE
+        session_id = body.session_id or str(uuid.uuid4())
+        try:
+            # Fetch conversation history for context
+            history = await db.chat_messages.find(
+                {"session_id": session_id},
+                {"_id": 0, "role": 1, "text": 1}
+            ).sort("ts", 1).limit(10).to_list(10)
+            
+            # Get user context if authenticated
+            user_context = None
+            if user:
+                movie_count = await db.movies.count_documents({"creator_id": user["id"]})
+                user_context = {"username": user.get("username", "Creator"), "created_movies": movie_count}
+            
+            reply = await chat_with_forge(body.message, history, user_context)
+        except Exception as e:
+            log.exception("Gemini chat failed")
+            raise HTTPException(500, f"AI error: {e}")
+    
+    # Persist conversation
     uid = user["id"] if user else "anon"
     await db.chat_messages.insert_one({
         "id": str(uuid.uuid4()), "session_id": session_id, "user_id": uid,
@@ -469,6 +519,25 @@ async def ai_chat(body: ChatIn, user=Depends(optional_user)):
         "role": "assistant", "text": str(reply), "ts": now_iso(),
     })
     return {"session_id": session_id, "reply": str(reply)}
+
+
+@api.post("/ai/suggestions")
+async def ai_suggestions(suggestion_type: str, context: dict, user=Depends(optional_user)):
+    """Get specific suggestions from FORGE."""
+    if not GOOGLE_GENAI_API_KEY and not GOOGLE_GENAI_USE_VERTEXAI:
+        raise HTTPException(503, "Google Cloud not configured")
+    
+    try:
+        suggestion = await get_forge_suggestion(suggestion_type, context)
+        if not suggestion:
+            raise HTTPException(500, "Failed to generate suggestion")
+        
+        return {"ok": True, "suggestion_type": suggestion_type, "suggestion": suggestion}
+    except Exception as e:
+        log.exception("Suggestion generation failed")
+        raise HTTPException(500, f"Suggestion error: {str(e)}")
+
+
 
 
 # ---------- Tips (Stripe) ----------
@@ -870,6 +939,122 @@ async def creator_earnings(user=Depends(get_current_user)):
         "licenses": {"count": len(lic_rows), "total": lic_total, "recent": lic_rows[:10]},
         "grand_total": round(tip_total + lic_total, 2),
     }
+
+
+# ---------- Google Cloud: Poster Generation ----------
+@api.post("/generate/poster")
+async def generate_poster_endpoint(body: PosterGenerationIn, user=Depends(get_current_user)):
+    """Generate a movie poster using Imagen."""
+    if not GOOGLE_GENAI_API_KEY and not GOOGLE_GENAI_USE_VERTEXAI:
+        raise HTTPException(503, "Google Cloud not configured")
+    
+    # Verify movie exists and user is creator
+    movie = await db.movies.find_one({"id": body.movie_id})
+    if not movie:
+        raise HTTPException(404, "Movie not found")
+    if movie["creator_id"] != user["id"]:
+        raise HTTPException(403, "Only the creator can generate posters")
+    
+    try:
+        poster_data = await generate_poster(body.prompt, body.aspect_ratio)
+        if not poster_data:
+            raise HTTPException(500, "Poster generation returned no data")
+        
+        # Store poster data and update movie
+        poster_id = str(uuid.uuid4())
+        await db.posters.insert_one({
+            "id": poster_id,
+            "movie_id": body.movie_id,
+            "creator_id": user["id"],
+            "image_data": poster_data,
+            "aspect_ratio": body.aspect_ratio,
+            "created_at": now_iso(),
+        })
+        
+        # Update movie with new poster URL
+        await db.movies.update_one(
+            {"id": body.movie_id},
+            {"$set": {"poster_url": f"/api/posters/{poster_id}", "poster_id": poster_id}}
+        )
+        
+        return {"ok": True, "poster_id": poster_id, "message": "Poster generated successfully"}
+    except Exception as e:
+        log.exception("Poster generation failed")
+        raise HTTPException(500, f"Poster generation error: {str(e)}")
+
+
+@api.get("/posters/{poster_id}")
+async def get_poster(poster_id: str):
+    """Retrieve a generated poster by ID."""
+    poster = await db.posters.find_one({"id": poster_id}, {"_id": 0})
+    if not poster:
+        raise HTTPException(404, "Poster not found")
+    return poster
+
+
+# ---------- Google Cloud: Video Generation ----------
+@api.post("/generate/video")
+async def generate_video_endpoint(body: VideoGenerationIn, user=Depends(get_current_user)):
+    """Generate a movie scene/trailer using Veo (when available)."""
+    if not GOOGLE_GENAI_API_KEY and not GOOGLE_GENAI_USE_VERTEXAI:
+        raise HTTPException(503, "Google Cloud not configured")
+    
+    # Verify movie exists and user is creator
+    movie = await db.movies.find_one({"id": body.movie_id})
+    if not movie:
+        raise HTTPException(404, "Movie not found")
+    if movie["creator_id"] != user["id"]:
+        raise HTTPException(403, "Only the creator can generate videos")
+    
+    try:
+        video_url = await generate_video(body.prompt, body.duration_seconds)
+        if not video_url:
+            raise HTTPException(503, "Video generation not yet available (Veo in preview)")
+        
+        return {"ok": True, "video_url": video_url, "message": "Video generated successfully"}
+    except Exception as e:
+        log.exception("Video generation failed")
+        raise HTTPException(500, f"Video generation error: {str(e)}")
+
+
+# ---------- Google Cloud: Prompt Enhancement ----------
+@api.post("/generate/enhance-prompt")
+async def enhance_prompt_endpoint(body: PromptEnhancementIn):
+    """Enhance a raw movie prompt into a cinematic logline."""
+    if not GOOGLE_GENAI_API_KEY and not GOOGLE_GENAI_USE_VERTEXAI:
+        raise HTTPException(503, "Google Cloud not configured")
+    
+    try:
+        enhanced = await enhance_movie_prompt(body.raw_prompt)
+        if not enhanced:
+            raise HTTPException(500, "Prompt enhancement returned no data")
+        
+        return {"ok": True, "enhanced_prompt": enhanced}
+    except Exception as e:
+        log.exception("Prompt enhancement failed")
+        raise HTTPException(500, f"Prompt enhancement error: {str(e)}")
+
+
+@api.post("/generate/scene-description")
+async def scene_description_endpoint(movie_id: str, scene_number: int = 1):
+    """Generate a detailed scene description for video generation."""
+    if not GOOGLE_GENAI_API_KEY and not GOOGLE_GENAI_USE_VERTEXAI:
+        raise HTTPException(503, "Google Cloud not configured")
+    
+    # Verify movie exists
+    movie = await db.movies.find_one({"id": movie_id})
+    if not movie:
+        raise HTTPException(404, "Movie not found")
+    
+    try:
+        description = await generate_scene_description(movie["prompt"], scene_number)
+        if not description:
+            raise HTTPException(500, "Scene description generation returned no data")
+        
+        return {"ok": True, "scene_number": scene_number, "description": description}
+    except Exception as e:
+        log.exception("Scene description generation failed")
+        raise HTTPException(500, f"Scene description error: {str(e)}")
 
 
 # ---------- Seed ----------
