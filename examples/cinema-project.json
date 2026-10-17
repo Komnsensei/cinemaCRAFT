@@ -1,0 +1,24 @@
+{
+  "title": "Rain City",
+  "output_dir": "output",
+  "target_width": 1920,
+  "target_height": 1080,
+  "fps": 24,
+  "characters": {
+    "lead": {
+      "name": "Mara",
+      "age": "adult woman in her thirties",
+      "face": "oval face, defined cheekbones",
+      "hair": "short dark wavy hair",
+      "eyes": "deep brown eyes",
+      "skin": "natural skin texture with visible pores",
+      "wardrobe": "charcoal wool coat",
+      "features": ["small scar over left eyebrow"],
+      "avoid": ["identity drift", "waxy skin", "unwanted text"]
+    }
+  },
+  "shots": [
+    {"id":"shot-001","prompt":"walking on a rain-soaked downtown street at blue hour","duration_seconds":6,"character":"lead","camera":"35mm lens, eye-level tracking shot","lighting":"storefront practicals and wet pavement reflections","aspect_ratio":"16:9"},
+    {"id":"shot-002","prompt":"stops beneath a flickering awning and looks toward the camera","duration_seconds":5,"character":"lead","camera":"85mm close-up, shallow depth of field","lighting":"soft side light and realistic specular highlights","aspect_ratio":"16:9"}
+  ]
+}
