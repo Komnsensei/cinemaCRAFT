@@ -159,8 +159,8 @@ class PosterGenerationIn(BaseModel):
 
 class VideoGenerationIn(BaseModel):
     movie_id: str
-    prompt: str
-    duration_seconds: int = 6  # 6-60 seconds
+    prompt: str = Field(min_length=1, max_length=4000)
+    duration_seconds: int = 6  # single Veo clip: 6 or 8 seconds
 
 
 class PromptEnhancementIn(BaseModel):
