@@ -20,6 +20,7 @@ from emergentintegrations.payments.stripe.checkout import (
     CheckoutSessionRequest,
 )
 from fastapi import Request
+from fastapi.responses import FileResponse
 from gcloud_integration import (
     generate_poster,
     generate_video,
@@ -995,26 +996,63 @@ async def get_poster(poster_id: str):
 # ---------- Google Cloud: Video Generation ----------
 @api.post("/generate/video")
 async def generate_video_endpoint(body: VideoGenerationIn, user=Depends(get_current_user)):
-    """Generate a movie scene/trailer using Veo (when available)."""
+    """Generate a Veo clip, persist it on the backend, and return a playable URL."""
     if not GOOGLE_GENAI_API_KEY and not GOOGLE_GENAI_USE_VERTEXAI:
-        raise HTTPException(503, "Google Cloud not configured")
-    
-    # Verify movie exists and user is creator
+        raise HTTPException(503, "Google GenAI is not configured")
+
+    # The current single-clip Veo path supports 6- or 8-second clips. Longer
+    # movies must be built by generating multiple scenes and assembling them.
+    if body.duration_seconds not in (6, 8):
+        raise HTTPException(422, "Single-scene Veo generation supports 6 or 8 seconds. Longer videos require scene-by-scene generation and assembly.")
+
     movie = await db.movies.find_one({"id": body.movie_id})
     if not movie:
         raise HTTPException(404, "Movie not found")
     if movie["creator_id"] != user["id"]:
         raise HTTPException(403, "Only the creator can generate videos")
-    
+
     try:
-        video_url = await generate_video(body.prompt, body.duration_seconds)
-        if not video_url:
-            raise HTTPException(503, "Video generation not yet available (Veo in preview)")
-        
-        return {"ok": True, "video_url": video_url, "message": "Video generated successfully"}
+        output_path = await generate_video(body.prompt, body.duration_seconds)
+        if not output_path:
+            raise HTTPException(502, "Veo did not return a video")
+        video_id = Path(output_path).name
+        if not video_id.endswith(".mp4") or Path(video_id).name != video_id:
+            raise RuntimeError("Video provider returned an invalid output path")
+
+        video_url = f"/api/videos/{video_id}"
+        await db.movies.update_one(
+            {"id": body.movie_id},
+            {"$set": {"latest_video_url": video_url, "video_updated_at": now_iso()}},
+        )
+        return {
+            "ok": True,
+            "video_id": video_id,
+            "video_url": video_url,
+            "duration_seconds": body.duration_seconds,
+            "message": "Video generated successfully",
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         log.exception("Video generation failed")
-        raise HTTPException(500, f"Video generation error: {str(e)}")
+        raise HTTPException(502, f"Video generation failed: {str(e)}")
+
+
+@api.get("/videos/{video_id}")
+async def get_generated_video(video_id: str):
+    """Stream a generated MP4 without exposing provider credentials."""
+    if Path(video_id).name != video_id or not video_id.endswith(".mp4"):
+        raise HTTPException(400, "Invalid video identifier")
+    video_path = (ROOT_DIR / "generated_videos" / video_id).resolve()
+    video_dir = (ROOT_DIR / "generated_videos").resolve()
+    if video_path.parent != video_dir or not video_path.is_file():
+        raise HTTPException(404, "Video not found")
+    return FileResponse(
+        path=video_path,
+        media_type="video/mp4",
+        filename=video_id,
+        content_disposition_type="inline",
+    )
 
 
 # ---------- Google Cloud: Prompt Enhancement ----------
