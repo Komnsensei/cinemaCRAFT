@@ -76,29 +76,74 @@ async def generate_poster(prompt: str, aspect_ratio: str = "9:16") -> Optional[s
         return None
 
 
+def _generate_video_sync(prompt: str, duration_seconds: int) -> str:
+    """Run Veo generation and download the result to backend/generated_videos."""
+    import time
+    import uuid
+    from pathlib import Path
+
+    output_dir = Path(__file__).resolve().parent / "generated_videos"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{uuid.uuid4().hex}.mp4"
+    client = get_gcloud_client()
+
+    model = os.environ.get("VEO_MODEL", "veo-3.1-generate-preview")
+    operation = client.models.generate_videos(
+        model=model,
+        prompt=prompt,
+        config=types.GenerateVideosConfig(
+            number_of_videos=1,
+            duration_seconds=duration_seconds,
+            aspect_ratio="16:9",
+            enhance_prompt=True,
+        ),
+    )
+
+    # Veo generation is an asynchronous provider operation. Bound polling so a
+    # hung provider request cannot occupy a worker forever.
+    deadline = time.monotonic() + int(os.environ.get("VEO_TIMEOUT_SECONDS", "600"))
+    while not operation.done:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Veo generation timed out before the video was ready")
+        time.sleep(10)
+        operation = client.operations.get(operation)
+
+    response = getattr(operation, "response", None)
+    generated_videos = getattr(response, "generated_videos", None) if response else None
+    if not generated_videos:
+        raise RuntimeError("Veo completed without returning a generated video")
+
+    try:
+        client.files.download(file=generated_videos[0].video, destination=str(output_path))
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            raise RuntimeError("Veo returned an empty video file")
+        return str(output_path)
+    except Exception:
+        output_path.unlink(missing_ok=True)
+        raise
+
+
 async def generate_video(prompt: str, duration_seconds: int = 6) -> Optional[str]:
     """
-    Generate a movie trailer/scene using Google's Veo model.
-    
-    Note: Veo video generation is currently in preview. This is a placeholder
-    for when the API becomes fully available.
-    
-    Args:
-        prompt: Text description of the video scene
-        duration_seconds: Duration of the video (typically 6-60 seconds)
-    
-    Returns:
-        URL to the generated video or None if generation fails
+    Generate a Veo scene and return its local MP4 path.
+
+    This function uses a worker thread for the blocking Google SDK calls so
+    FastAPI's event loop remains responsive while Veo is generating.
+    Supported single-clip durations are 6 or 8 seconds.
     """
+    import asyncio
+
+    clean_prompt = prompt.strip() if isinstance(prompt, str) else ""
+    if not clean_prompt:
+        raise ValueError("Video prompt must not be empty")
+    if duration_seconds not in (6, 8):
+        raise ValueError("Veo single-clip duration must be 6 or 8 seconds")
+
     try:
-        # Veo video generation is still in limited preview
-        # This is a placeholder for future implementation
-        log.warning("Veo video generation not yet fully available in this SDK version")
-        return None
-        
-    except Exception as e:
-        log.error(f"Video generation failed: {e}")
-        return None
+        return await asyncio.to_thread(_generate_video_sync, clean_prompt, duration_seconds)
+    except Exception:
+        log.exception("Video generation failed")
+        raise
 
 
 async def generate_scene_description(movie_prompt: str, scene_number: int) -> Optional[str]:
